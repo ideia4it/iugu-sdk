@@ -119,6 +119,25 @@ defmodule Iugu.Webhook.SyncTest do
     assert_received {:deleted, "dup"}
     refute_received {:deleted, "theirs"}
 
+    # When the copies differ in state the active one survives, whatever the
+    # order Iugu lists them in: pruning the only delivering trigger would
+    # leave the url silent.
+    stub_api(
+      events: ["invoice.status_changed"],
+      existing: [
+        trigger("sleeping", "invoice.status_changed", active: false),
+        trigger("awake", "invoice.status_changed")
+      ]
+    )
+
+    assert {:ok, report} = Iugu.sync_webhooks(@url, prune: true, request_interval_ms: 0)
+
+    assert Enum.map(report.unchanged, & &1.id) == ["awake"]
+    assert report.inactive == []
+    assert Enum.map(report.deleted, & &1.id) == ["sleeping"]
+    assert_received {:deleted, "sleeping"}
+    refute_received {:deleted, "awake"}
+
     # remove_all drops every trigger of that url, whatever the event list says,
     # and still leaves the other url alone.
     stub_api(
@@ -229,15 +248,36 @@ defmodule Iugu.Webhook.SyncTest do
 
     assert {:error, %Error{kind: :validation}} = Iugu.sync_webhooks(@url, request_interval_ms: 0)
 
-    stub_api(
+    # The account enforces the limit on the POST itself, so the stale trigger
+    # has to go before the new one is created, or neither survives.
+    full_account =
+      Enum.map(1..19, &trigger("other-#{&1}", "invoice.event_#{&1}", url: @other_url)) ++
+        [trigger("old", "invoice.created")]
+
+    stub_counting_api(events: ["invoice.status_changed"], existing: full_account)
+
+    assert {:ok,
+            %{
+              created: [%{event: "invoice.status_changed", id: "new"}],
+              deleted: [%{id: "old"}],
+              failed: []
+            }} = Iugu.sync_webhooks(@url, prune: true, request_interval_ms: 0)
+
+    # When the delete fails the room never opens: nothing is created and the
+    # report says why for each event left out.
+    stub_counting_api(
       events: ["invoice.status_changed"],
-      existing:
-        Enum.map(1..19, &trigger("other-#{&1}", "invoice.event_#{&1}", url: @other_url)) ++
-          [trigger("old", "invoice.created")]
+      existing: full_account,
+      delete_status: 500
     )
 
-    assert {:ok, %{created: [%{event: "invoice.status_changed"}], deleted: [%{id: "old"}]}} =
+    assert {:ok, %{created: [], deleted: [], failed: failed}} =
              Iugu.sync_webhooks(@url, prune: true, request_interval_ms: 0)
+
+    assert [
+             %{event: "invoice.created", error: %Error{status: 500}},
+             %{event: "invoice.status_changed", error: %Error{kind: :validation, status: nil}}
+           ] = failed
 
     # The account that really allows thirty says so.
     Req.Test.stub(Iugu.Client, fn conn ->
@@ -289,6 +329,48 @@ defmodule Iugu.Webhook.SyncTest do
 
     assert {:error, %Error{kind: :unauthorized}} =
              Iugu.sync_webhooks(@url, request_interval_ms: 0)
+  end
+
+  # A stand-in for the account itself: it counts live triggers and refuses
+  # the twenty-first, the way Iugu does.
+  defp stub_counting_api(opts) do
+    events = Keyword.fetch!(opts, :events)
+    existing = Keyword.fetch!(opts, :existing)
+    delete_status = Keyword.get(opts, :delete_status, 200)
+
+    live =
+      start_supervised!(
+        Supervisor.child_spec({Agent, fn -> length(existing) end}, id: make_ref())
+      )
+
+    Req.Test.stub(Iugu.Client, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", "/v1/web_hooks/supported_events"} ->
+          Req.Test.json(conn, events)
+
+        {"GET", "/v1/web_hooks"} ->
+          Req.Test.json(conn, existing)
+
+        {"POST", "/v1/web_hooks"} ->
+          create_within_limit(conn, Agent.get_and_update(live, &{&1 < 20, &1 + 1}))
+
+        {"DELETE", "/v1/web_hooks/" <> id} when delete_status == 200 ->
+          Agent.update(live, &(&1 - 1))
+          Req.Test.json(conn, %{"id" => id})
+
+        {"DELETE", "/v1/web_hooks/" <> _id} ->
+          conn |> Plug.Conn.put_status(delete_status) |> Req.Test.json(%{"errors" => "boom"})
+      end
+    end)
+  end
+
+  defp create_within_limit(conn, true),
+    do: Req.Test.json(conn, %{"id" => "new", "active" => true})
+
+  defp create_within_limit(conn, false) do
+    conn
+    |> Plug.Conn.put_status(422)
+    |> Req.Test.json(%{"errors" => "Limite de gatilhos atingido"})
   end
 
   defp trigger(id, event, opts \\ []) do

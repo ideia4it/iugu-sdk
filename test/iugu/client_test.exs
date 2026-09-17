@@ -311,4 +311,41 @@ defmodule Iugu.ClientTest do
   defp authorization(%Req.Request{headers: headers}) do
     headers |> Map.get("authorization", []) |> List.first()
   end
+
+  test "never follows a redirect: a 3xx comes back as an error instead of replaying the token, the signature and the body on the host the answer named" do
+    {private_key_pem, _public_key} = generate_key_pair()
+    test_pid = self()
+
+    Req.Test.stub(Iugu.Client, fn conn ->
+      send(test_pid, {:request, conn.host, conn.request_path})
+
+      conn
+      |> Plug.Conn.put_resp_header(
+        "location",
+        "https://untrusted.example/v1/marketplace/create_account"
+      )
+      |> Plug.Conn.send_resp(307, "")
+    end)
+
+    assert {:error, %Error{status: 307, path: "/v1/marketplace/create_account"}} =
+             Client.post("/v1/marketplace/create_account", %{"name" => "Loja Ana"},
+               sign: true,
+               signature_private_key: private_key_pem
+             )
+
+    assert_received {:request, "api.iugu.com", "/v1/marketplace/create_account"}
+    refute_received {:request, _host, _path}
+
+    # Not even the caller can switch it back on: the option is overridden
+    # after every merge.
+    assert {:error, %Error{status: 307}} =
+             Client.post("/v1/marketplace/create_account", %{"name" => "Loja Ana"},
+               sign: true,
+               signature_private_key: private_key_pem,
+               redirect: true
+             )
+
+    assert_received {:request, "api.iugu.com", "/v1/marketplace/create_account"}
+    refute_received {:request, _host, _path}
+  end
 end

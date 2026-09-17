@@ -23,7 +23,8 @@ defmodule Iugu.Webhook.Sync do
   reativa; isso é decisão de quem opera, pelo painel.
 
   Gatilhos repetidos para o mesmo `{url, event}` voltam em `:duplicated`
-  (todos menos o primeiro); com `prune: true` eles são removidos, junto com
+  (todos menos um: sobrevive um ativo, ou o primeiro quando estão todos no
+  mesmo estado); com `prune: true` eles são removidos, junto com
   os gatilhos da URL cujo evento saiu da lista. Sem `prune`, apontar o
   ambiente para outra URL deixaria os antigos ativos e a Iugu entregaria o
   mesmo evento duas vezes.
@@ -37,7 +38,10 @@ defmodule Iugu.Webhook.Sync do
   `:max_triggers` (padrão 20). As saídas são `only:` com os eventos que
   interessam ou `events: ["all"]`, que assina tudo com um gatilho só e
   despacha pelo nome em `Iugu.Webhook.Event`. A tabela de erros
-  fala em 30; se a conta aceitar, passe `max_triggers: 30`.
+  fala em 30; se a conta aceitar, passe `max_triggers: 30`. Um plano que só
+  cabe contando com o `prune` apaga antes de criar, e se alguma exclusão
+  falhar e a conta continuar no limite, nada é criado: cada evento que
+  ficou de fora volta em `:failed`.
 
   ## Sem ping e sem limite de requisições documentado
 
@@ -119,7 +123,7 @@ defmodule Iugu.Webhook.Sync do
          {:ok, all_triggers} <- Webhook.list(req_opts) do
       plan = build_plan(url, wanted, all_triggers, sync_opts)
 
-      with :ok <- check_capacity(plan, all_triggers, sync_opts) do
+      with :ok <- check_capacity(plan) do
         {:ok, apply_plan(plan, sync_opts, req_opts)}
       end
     end
@@ -210,6 +214,8 @@ defmodule Iugu.Webhook.Sync do
     %{
       url: url,
       wanted_authorization: wanted_authorization,
+      total_triggers: length(all_triggers),
+      max_triggers: Keyword.get(sync_opts, :max_triggers, @default_max_triggers),
       missing: missing,
       to_update: Enum.map(to_update, &first_by_event[&1]),
       unchanged: Enum.map(unchanged, &first_by_event[&1]),
@@ -219,15 +225,20 @@ defmodule Iugu.Webhook.Sync do
     }
   end
 
-  # A Iugu mantém todas as duplicatas; a primeira vista para um evento é a que
-  # a sincronização considera, as demais são reportadas (e removidas quando
-  # pedido).
+  # A Iugu mantém todas as duplicatas; a sincronização considera uma por
+  # evento e reporta as demais (removendo-as quando pedido). Entre um ativo e
+  # um inativo sobrevive o ativo, senão a poda apagaria o único que entrega.
   defp split_duplicates(existing) do
-    Enum.reduce(existing, {%{}, []}, fn trigger, {first_by_event, duplicated} ->
-      if Map.has_key?(first_by_event, trigger.event) do
-        {first_by_event, duplicated ++ [trigger]}
-      else
-        {Map.put(first_by_event, trigger.event, trigger), duplicated}
+    Enum.reduce(existing, {%{}, []}, fn trigger, {kept_by_event, duplicated} ->
+      case Map.fetch(kept_by_event, trigger.event) do
+        {:ok, %{active: false} = kept} when trigger.active != false ->
+          {Map.put(kept_by_event, trigger.event, trigger), duplicated ++ [kept]}
+
+        {:ok, _kept} ->
+          {kept_by_event, duplicated ++ [trigger]}
+
+        :error ->
+          {Map.put(kept_by_event, trigger.event, trigger), duplicated}
       end
     end)
   end
@@ -235,28 +246,30 @@ defmodule Iugu.Webhook.Sync do
   defp needs_authorization?(_trigger, nil), do: false
   defp needs_authorization?(trigger, wanted), do: trigger.authorization != wanted
 
-  defp check_capacity(plan, all_triggers, sync_opts) do
-    max_triggers = Keyword.get(sync_opts, :max_triggers, @default_max_triggers)
-    after_plan = length(all_triggers) - length(plan.to_delete) + length(plan.missing)
+  defp check_capacity(plan) do
+    after_plan = plan.total_triggers - length(plan.to_delete) + length(plan.missing)
 
-    if after_plan <= max_triggers do
+    if after_plan <= plan.max_triggers do
       :ok
     else
       {:error,
        Error.validation(
-         "o plano deixaria a conta com #{after_plan} gatilhos, acima do limite de #{max_triggers}. " <>
+         "o plano deixaria a conta com #{after_plan} gatilhos, acima do limite de #{plan.max_triggers}. " <>
            "Restrinja com only:, assine tudo com events: [\"all\"] ou remova gatilhos de outras URLs.",
          "/v1/web_hooks"
        )}
     end
   end
 
+  # As exclusões saem primeiro: o plano pode caber no limite só contando com
+  # elas, e a Iugu recusa o gatilho novo enquanto o velho ocupa a vaga.
   defp apply_plan(plan, sync_opts, req_opts) do
     dry_run = Keyword.get(sync_opts, :dry_run, false)
 
+    {deleted, delete_failures} = delete_extra(plan, sync_opts, req_opts, dry_run)
+    {plan, no_room_failures} = refuse_missing_without_room(plan, length(deleted))
     {created, create_failures} = create_missing(plan, sync_opts, req_opts, dry_run)
     {updated, update_failures} = update_authorization(plan, sync_opts, req_opts, dry_run)
-    {deleted, delete_failures} = delete_extra(plan, sync_opts, req_opts, dry_run)
 
     %{
       url: plan.url,
@@ -267,8 +280,22 @@ defmodule Iugu.Webhook.Sync do
       inactive: Enum.map(plan.inactive, &entry/1),
       duplicated: Enum.map(plan.duplicated, &entry/1),
       deleted: deleted,
-      failed: create_failures ++ update_failures ++ delete_failures
+      failed: delete_failures ++ no_room_failures ++ create_failures ++ update_failures
     }
+  end
+
+  defp refuse_missing_without_room(plan, deleted_count) do
+    if plan.total_triggers - deleted_count + length(plan.missing) <= plan.max_triggers do
+      {plan, []}
+    else
+      error =
+        Error.validation(
+          "a exclusão de gatilhos falhou e a conta continua no limite de #{plan.max_triggers}; nenhum gatilho foi criado.",
+          "/v1/web_hooks"
+        )
+
+      {%{plan | missing: []}, Enum.map(plan.missing, &%{event: &1, error: error})}
+    end
   end
 
   defp create_missing(%{missing: []}, _sync_opts, _req_opts, _dry_run), do: {[], []}

@@ -122,6 +122,7 @@ defmodule Iugu.Account do
   alias Iugu.Money
   alias Iugu.Params
   alias Iugu.Response
+  alias Iugu.Split
 
   @accounts_path "/v1/accounts"
   @configuration_path "/v1/accounts/configuration"
@@ -328,10 +329,24 @@ defmodule Iugu.Account do
     settings = settings |> Params.stringify_keys() |> convert_configuration_values()
 
     with :ok <- validate_configuration(settings),
+         {:ok, settings} <- validate_splits(settings),
          {:ok, body} <- Client.post(@configuration_path, settings, Keyword.put(opts, :sign, true)) do
       {:ok, normalize_account(body)}
     end
   end
+
+  # Os splits padrão passam pela regra da fatura: a soma que alcança 100% não
+  # dá erro na Iugu, só faz o split ser ignorado.
+  defp validate_splits(%{"splits" => splits} = settings) when is_list(splits) do
+    splits = Enum.map(splits, &Split.cast/1)
+
+    case Split.validate(splits) do
+      :ok -> {:ok, Map.put(settings, "splits", Split.to_params(splits))}
+      {:error, %Error{} = error} -> {:error, %Error{error | path: @configuration_path}}
+    end
+  end
+
+  defp validate_splits(settings), do: {:ok, settings}
 
   @doc """
   Edita a subconta: site, dias de cobrança e trial de assinaturas, URL de

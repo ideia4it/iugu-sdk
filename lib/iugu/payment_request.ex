@@ -26,10 +26,14 @@ defmodule Iugu.PaymentRequest do
 
   `create/2` autentica com o `live_api_token` da conta pagadora (subconta ou
   mestre) e exige a assinatura RSA, como toda rota que move dinheiro; no
-  fluxo whitelabel a chave é a da mestre e o token, o da subconta. A rota
-  **não documenta `Idempotency-Key`**, então `create/2` nunca repete: um
-  timeout pode ter pago o boleto, e a repetição pagaria de novo. Quem
-  precisa saber o desfecho lista por `barcode` em `list/1`.
+  fluxo whitelabel a chave é a da mestre e o token, o da subconta. Desde
+  16/09/2026 a página de idempotência da Iugu lista "Criar Pedido de
+  Pagamento" entre as rotas que aceitam `Idempotency-Key` (validade de 24
+  horas, repetição recusada com 409, `resource_id: "processing"` enquanto a
+  primeira ainda roda). Com `:idempotency_key` o header entra e o retry liga;
+  sem a chave `create/2` nunca repete: um timeout pode ter pago o boleto, e
+  a repetição pagaria de novo. Quem precisa saber o desfecho lista por
+  `barcode` em `list/1`.
 
   As outras três rotas (`validate_barcode/2`, `get/2`, `list/1`) aceitam
   `live_api_token` ou `test_api_token`, sem assinatura.
@@ -55,8 +59,9 @@ defmodule Iugu.PaymentRequest do
       400 ou 422
     * se `GET /v1/payment_requests` traz `totalItems` (o exemplo é uma lista
       crua, sem envelope) e se a mestre enxerga os pedidos das subcontas
-    * se a rota de criação aceita `Idempotency-Key` sem documentar
     * os valores de `status` além dos quatro do filtro da listagem
+    * se a página da rota, que ainda não menciona o header, e a página de
+      idempotência, que lista a rota, concordam na prática
   """
 
   alias Iugu.Client
@@ -148,19 +153,25 @@ defmodule Iugu.PaymentRequest do
   Paga um boleto com o saldo da conta. Veja o moduledoc.
 
   Requisição assinada, autenticada com o `live_api_token` da conta pagadora
-  em `api_token:`, **sem retry** (a rota não documenta `Idempotency-Key`).
-  `attrs` leva `barcode`, `amount_cents`, `document_amount_cents` e
+  em `api_token:`. Aceita `:idempotency_key`, que manda o header e liga o
+  retry; sem ela, **sem retry**. `attrs` leva `barcode`, `amount_cents`,
+  `document_amount_cents` e
   `description`, em átomo ou string; o que a Iugu recusaria com 400 volta
   como `kind: :validation, status: nil` sem ir lá, e uma chave fora da lista
   levanta `ArgumentError`. A resposta vem normalizada como em `get/2`.
   """
   @spec create(map(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def create(attrs, opts \\ []) when is_map(attrs) do
+    {idempotency_key, req_opts} = Keyword.pop(opts, :idempotency_key)
     body = build_create_body(attrs)
 
     with :ok <- validate_create(body),
          {:ok, response} <-
-           Client.post(@path, body, Keyword.merge(opts, sign: true, retry: false)) do
+           Client.post(
+             @path,
+             body,
+             req_opts |> Client.idempotency_options(idempotency_key) |> Keyword.put(:sign, true)
+           ) do
       {:ok, normalize(response)}
     end
   end

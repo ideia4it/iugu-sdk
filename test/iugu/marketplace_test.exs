@@ -92,6 +92,25 @@ defmodule Iugu.MarketplaceTest do
                Iugu.create_account(name, signature_private_key: private_key_pem)
     end
 
+    # Iugu would accept this default split too, and then ignore it on every
+    # invoice of the subaccount, handing the whole amount to the creator.
+    assert {:error,
+            %Error{
+              kind: :validation,
+              status: nil,
+              path: "/v1/marketplace/create_account",
+              messages: [message]
+            }} =
+             Iugu.create_account("Loja Ana",
+               splits: [
+                 %{recipient_account_id: "A", percent: 60},
+                 Iugu.Split.percent("B", 40)
+               ],
+               signature_private_key: private_key_pem
+             )
+
+    assert message =~ "100%"
+
     # A 200 without the tokens would leave the subaccount unreachable forever.
     Req.Test.stub(Iugu.Client, fn conn ->
       Req.Test.json(conn, %{"account_id" => "ACC"})

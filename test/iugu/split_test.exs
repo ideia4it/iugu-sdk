@@ -211,9 +211,48 @@ defmodule Iugu.SplitTest do
 
     assert Split.payment_methods() == ["credit_card", "bank_slip", "pix"]
 
+    # Amounts of different payment methods, or of different installment
+    # counts, never meet in one payment: 60% on Pix plus 60% on card takes
+    # at most 60% of any invoice, while 60% plus 40% both on Pix is the
+    # 100% Iugu ignores.
+    pix_and_card = [
+      Split.new(recipient_account_id: "A", pix_percent: 60),
+      Split.new(recipient_account_id: "B", credit_card_percent: 60)
+    ]
+
+    assert :ok = Split.validate(pix_and_card)
+    assert :ok = Split.validate(pix_and_card, 10_000)
+    assert Split.total_cents(pix_and_card, 10_000) == 6_000
+
+    assert :ok =
+             Split.validate([
+               Split.new(recipient_account_id: "A", credit_card_3x_percent: 60),
+               Split.new(recipient_account_id: "B", credit_card_6x_percent: 60)
+             ])
+
+    assert Split.total_cents(
+             [
+               Split.new(recipient_account_id: "A", pix_cents: 6_000),
+               Split.new(recipient_account_id: "B", credit_card_6x_cents: 6_000)
+             ],
+             10_000
+           ) == 6_000
+
     # Each of these is either a 422 from Iugu or, worse, a split that is
     # silently ignored at payment time.
     refused = [
+      {[
+         Split.new(recipient_account_id: "A", pix_percent: 60),
+         Split.new(recipient_account_id: "B", pix_percent: 40)
+       ], nil, [], ~r/100%/},
+      {[
+         Split.new(recipient_account_id: "A", credit_card_6x_percent: 60),
+         Split.new(recipient_account_id: "B", credit_card_6x_percent: 40)
+       ], nil, [], ~r/100%/},
+      {[
+         Split.new(recipient_account_id: "A", pix_cents: 6_000),
+         Split.new(recipient_account_id: "B", pix_cents: 4_000)
+       ], 10_000, [], ~r/abaixo do total/},
       {[%Split{recipient_account_id: ""}], 10_000, [], ~r/recipient_account_id/},
       {[%Split{recipient_account_id: "A"}], 10_000, [], ~r/centavos ou em percentual/},
       {[Split.fixed("A", 0)], 10_000, [], ~r/positivo/},

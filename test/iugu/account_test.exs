@@ -3,6 +3,7 @@ defmodule Iugu.AccountTest do
 
   alias Iugu
   alias Iugu.Error
+  alias Iugu.Split
 
   import Iugu.TestHelpers
 
@@ -364,6 +365,39 @@ defmodule Iugu.AccountTest do
                api_token: @subaccount_token,
                signature_private_key: private_key_pem
              )
+
+    # Default splits go through the same rule as an invoice's: serialized to
+    # the API keys when sound, refused before the call when they reach 100%,
+    # which Iugu accepts and then silently ignores.
+    expect_request_raw(fn conn, raw_body ->
+      assert Jason.decode!(raw_body) == %{
+               "splits" => [%{"recipient_account_id" => "MASTER", "pix_percent" => 4}]
+             }
+
+      Req.Test.json(conn, account_body(%{}))
+    end)
+
+    assert {:ok, %{}} =
+             Iugu.configure_account(
+               %{splits: [%{recipient_account_id: "MASTER", pix_percent: 4}]},
+               api_token: @subaccount_token,
+               signature_private_key: private_key_pem
+             )
+
+    assert {:error,
+            %Error{
+              kind: :validation,
+              status: nil,
+              path: "/v1/accounts/configuration",
+              messages: [message]
+            }} =
+             Iugu.configure_account(
+               %{splits: [%{recipient_account_id: "A", percent: 60}, Split.percent("B", 40)]},
+               api_token: @subaccount_token,
+               signature_private_key: private_key_pem
+             )
+
+    assert message =~ "100%"
 
     # A signature failure is a 422 from Iugu, classified as validation.
     Req.Test.stub(Iugu.Client, fn conn ->

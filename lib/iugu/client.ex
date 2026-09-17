@@ -76,6 +76,15 @@ defmodule Iugu.Client do
   Num POST o valor certo é `:transient`, não `:safe_transient`:
   `:safe_transient` só considera GET e HEAD seguros, então num POST ele
   repetiria apenas em 429 e 503, deixando o timeout de fora.
+
+  ## Redirect nunca
+
+  A API não redireciona, e seguir um redirect seria perigoso: o Req tira o
+  `Authorization` quando o host muda, mas o passo de assinatura roda de novo
+  na requisição nova, recolocando o token na query, assinando e enviando o
+  corpo inteiro para o destino que a resposta apontou. Por isso todo cliente
+  sai com `redirect: false`, imposto depois de `:req_options` e da opção da
+  chamada, e um 3xx volta como `{:error, %Iugu.Error{}}` com o status.
   """
 
   alias Iugu.Config
@@ -114,10 +123,12 @@ defmodule Iugu.Client do
           [accept: "application/json"],
       receive_timeout: Config.receive_timeout(),
       retry: false,
+      redirect: false,
       finch: [pool_max_idle_time: :timer.seconds(60)]
     ]
     |> Keyword.merge(Application.get_env(:iugu_sdk, :req_options, []))
     |> Keyword.merge(req_opts)
+    |> Keyword.put(:redirect, false)
     |> Req.new()
   end
 
@@ -234,7 +245,7 @@ defmodule Iugu.Client do
     |> Keyword.put(:api_token, api_token)
     |> new()
     |> attach_signature(api_token, signature_opts)
-    |> Req.request([method: method, url: path] ++ req_opts)
+    |> Req.request([method: method, url: path] ++ Keyword.put(req_opts, :redirect, false))
     |> normalize(path)
   end
 

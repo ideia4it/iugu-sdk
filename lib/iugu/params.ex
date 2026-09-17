@@ -134,10 +134,21 @@ defmodule Iugu.Params do
   def format_local_datetime(%Date{} = date), do: Date.to_iso8601(date)
   def format_local_datetime(value) when is_binary(value), do: value
 
-  @doc "`Date` em `AAAA-MM-DD`; string passa como veio."
-  @spec format_date(Date.t() | String.t() | nil) :: String.t() | nil
+  @doc """
+  `Date` em `AAAA-MM-DD`; `DateTime` vira o dia dele no horário de São Paulo;
+  string passa como veio.
+  """
+  @spec format_date(Date.t() | DateTime.t() | String.t() | nil) :: String.t() | nil
   def format_date(nil), do: nil
   def format_date(%Date{} = date), do: Date.to_iso8601(date)
+
+  def format_date(%DateTime{} = datetime) do
+    datetime
+    |> DateTime.shift_zone!(@time_zone, Tzdata.TimeZoneDatabase)
+    |> DateTime.to_date()
+    |> Date.to_iso8601()
+  end
+
   def format_date(value) when is_binary(value), do: value
 
   @doc """

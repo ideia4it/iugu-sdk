@@ -505,13 +505,16 @@ defmodule Iugu.TransferRequestTest do
       assert conn.request_path == "/v1/transfer_requests/"
       assert_basic(conn, @subaccount_token)
 
+      # The reference spells the sort parameter sortBy and declares every
+      # date filter as AAAA-MM-DD; a DateTime lands on its São Paulo day.
       assert conn.query_params == %{
                "start" => "100",
                "limit" => "100",
                "query" => "ana@loja.example",
-               "sortby" => "executed_at",
+               "sortBy" => "executed_at",
+               "created_at_from" => "2026-08-01",
                "updated_at_from" => "2026-09-01",
-               "updated_at_to" => "2026-09-30T20:59:59-03:00"
+               "updated_at_to" => "2026-09-30"
              }
 
       Req.Test.json(conn, %{
@@ -530,8 +533,9 @@ defmodule Iugu.TransferRequestTest do
                limit: 1_000,
                query: "ana@loja.example",
                sort_by: "executed_at",
+               created_at_from: "2026-08-01",
                updated_at_from: ~D[2026-09-01],
-               updated_at_to: ~U[2026-09-30 23:59:59Z],
+               updated_at_to: ~U[2026-10-01 02:59:59Z],
                api_token: @subaccount_token
              )
 

@@ -217,6 +217,15 @@ defmodule Iugu.Split do
     end)
   end
 
+  @doc """
+  Uma regra a partir de `t:t/0` já pronta ou dos atributos de `new/1`.
+
+  Serve às rotas que recebem `splits` do chamador em qualquer das duas formas.
+  """
+  @spec cast(t() | map() | keyword()) :: t()
+  def cast(%__MODULE__{} = split), do: split
+  def cast(attrs), do: new(attrs)
+
   @doc "Formas de pagamento com campos próprios de split."
   @spec payment_methods() :: [String.t()]
   def payment_methods, do: @payment_methods
@@ -264,7 +273,8 @@ defmodule Iugu.Split do
   Sem o total (`nil`), aplica o que não depende dele: destinatário presente e
   sem repetição, pelo menos um valor por regra, valores positivos, `cents` e
   `percent` juntos só com `permit_aggregated`, percentuais que não alcançam
-  100% e, com a opção `:own_account_id`, a conta criadora fora da lista. Com
+  100% em nenhuma forma de pagamento nem parcelamento e, com a opção
+  `:own_account_id`, a conta criadora fora da lista. Com
   o total da fatura em centavos, confere também que o pior caso de
   `total_cents/3` fica abaixo dele, que é a regra cuja violação a Iugu não
   avisa.
@@ -287,8 +297,9 @@ defmodule Iugu.Split do
   Com `payment_method:` (`"credit_card"`, `"bank_slip"` ou `"pix"`) e, no
   cartão, `installments:`, soma os campos genéricos com os daquela forma e
   daquele parcelamento. Sem essas opções estima o **pior caso**: a forma e o
-  parcelamento que mais tiram da fatura, que é o número que interessa para
-  garantir que o split nunca alcança o total.
+  parcelamento que mais tiram da fatura, somando as regras de todos os
+  destinatários dentro desse mesmo cenário, que é o número que interessa
+  para garantir que o split nunca alcança o total.
 
   O percentual é calculado sobre o total e arredondado meio para cima; a
   Iugu não documenta o arredondamento dela.
@@ -306,9 +317,10 @@ defmodule Iugu.Split do
   @spec total_cents([t()], non_neg_integer(), keyword()) :: non_neg_integer()
   def total_cents(splits, invoice_total_cents, opts \\ [])
       when is_list(splits) and is_integer(invoice_total_cents) do
-    Enum.reduce(splits, 0, fn split, total ->
-      total + rule_cents(split, invoice_total_cents, opts)
-    end)
+    splits
+    |> scenarios(Keyword.get(opts, :payment_method), Keyword.get(opts, :installments))
+    |> Enum.map(&scenario_cents(splits, invoice_total_cents, &1))
+    |> Enum.max()
   end
 
   @doc """
@@ -485,9 +497,15 @@ defmodule Iugu.Split do
 
   # O percentual sozinho tem que ficar abaixo de 100 seja qual for o valor da
   # fatura; a checagem baseada em centavos precisa do total e mora em
-  # validate_total/2.
+  # validate_total/2. A soma é por cenário de pagamento: os campos de formas
+  # diferentes nunca se aplicam a um mesmo pagamento, então 60% só no Pix e
+  # 60% só no cartão não são 120%.
   defp validate_percent_share(splits) do
-    share = Enum.reduce(splits, 0, fn split, share -> share + worst_case_percent(split) end)
+    share =
+      splits
+      |> scenarios(nil, nil)
+      |> Enum.map(&scenario_percent(splits, &1))
+      |> Enum.max()
 
     if share < 100 do
       :ok
@@ -512,27 +530,41 @@ defmodule Iugu.Split do
     end
   end
 
-  defp rule_cents(%__MODULE__{} = split, invoice_total_cents, opts) do
-    generic = amount_cents(split.cents, split.percent, invoice_total_cents)
-
-    case Keyword.get(opts, :payment_method) do
-      nil ->
-        generic + worst_case_method_cents(split, invoice_total_cents)
-
-      method when method in @payment_methods ->
-        generic +
-          method_cents(split, method, invoice_total_cents, Keyword.get(opts, :installments))
-
-      other ->
-        raise ArgumentError,
-              "forma de pagamento inválida: #{inspect(other)}. Use uma de #{inspect(@payment_methods)}."
-    end
+  # Um cenário é uma forma de pagamento e, no cartão, um número de parcelas.
+  # Sem forma, todas; no cartão sem parcelamento, o pagamento à vista e cada
+  # parcelamento com regra, porque o pior caso pode estar em qualquer um.
+  defp scenarios(splits, nil, _installments) do
+    Enum.flat_map(@payment_methods, &scenarios(splits, &1, nil))
   end
 
-  defp worst_case_method_cents(split, invoice_total_cents) do
-    @payment_methods
-    |> Enum.map(&method_cents(split, &1, invoice_total_cents, nil))
-    |> Enum.max()
+  defp scenarios(splits, "credit_card", nil) do
+    Enum.map(installment_counts(splits), &{"credit_card", &1})
+  end
+
+  defp scenarios(_splits, method, installments) when method in @payment_methods do
+    [{method, installments}]
+  end
+
+  defp scenarios(_splits, other, _installments) do
+    raise ArgumentError,
+          "forma de pagamento inválida: #{inspect(other)}. Use uma de #{inspect(@payment_methods)}."
+  end
+
+  defp installment_counts(splits) do
+    Enum.uniq([1 | Enum.flat_map(splits, &Map.keys(&1.installments))])
+  end
+
+  defp scenario_percent(splits, {method, installments}) do
+    Enum.reduce(splits, 0, fn split, share ->
+      share + (split.percent || 0) + method_percent(split, method, installments)
+    end)
+  end
+
+  defp scenario_cents(splits, invoice_total_cents, {method, installments}) do
+    Enum.reduce(splits, 0, fn split, total ->
+      total + amount_cents(split.cents, split.percent, invoice_total_cents) +
+        method_cents(split, method, invoice_total_cents, installments)
+    end)
   end
 
   defp method_cents(split, method, invoice_total_cents, installments) do
@@ -548,23 +580,14 @@ defmodule Iugu.Split do
     per_method + installment_cents(split, method, invoice_total_cents, installments)
   end
 
-  defp installment_cents(_split, method, _invoice_total_cents, _installments)
-       when method != "credit_card",
-       do: 0
-
-  defp installment_cents(split, "credit_card", invoice_total_cents, nil) do
-    split.installments
-    |> Map.values()
-    |> Enum.map(&amount_cents(&1[:cents], &1[:percent], invoice_total_cents))
-    |> Enum.max(fn -> 0 end)
-  end
-
   defp installment_cents(split, "credit_card", invoice_total_cents, installments) do
     case Map.get(split.installments, installments) do
       nil -> 0
       amounts -> amount_cents(amounts[:cents], amounts[:percent], invoice_total_cents)
     end
   end
+
+  defp installment_cents(_split, _method, _invoice_total_cents, _installments), do: 0
 
   defp amount_cents(cents, percent, invoice_total_cents) do
     (cents || 0) + percent_to_cents(percent, invoice_total_cents)
@@ -584,26 +607,11 @@ defmodule Iugu.Split do
   defp to_decimal(value) when is_integer(value), do: Decimal.new(value)
   defp to_decimal(value) when is_float(value), do: Decimal.from_float(value)
 
-  defp worst_case_percent(%__MODULE__{} = split) do
-    method_share =
-      @payment_methods
-      |> Enum.map(&method_percent(split, &1))
-      |> Enum.max()
-
-    (split.percent || 0) + method_share
+  defp method_percent(split, "credit_card", installments) do
+    (split.credit_card_percent || 0) + (get_in(split.installments, [installments, :percent]) || 0)
   end
 
-  defp method_percent(split, "credit_card") do
-    installment_share =
-      split.installments
-      |> Map.values()
-      |> Enum.map(&(&1[:percent] || 0))
-      |> Enum.max(fn -> 0 end)
-
-    (split.credit_card_percent || 0) + installment_share
-  end
-
-  defp method_percent(split, method) do
+  defp method_percent(split, method, _installments) do
     {_cents_field, percent_field} = Map.fetch!(@method_amount_fields, method)
 
     Map.fetch!(split, percent_field) || 0

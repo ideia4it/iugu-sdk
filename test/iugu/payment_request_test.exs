@@ -120,18 +120,48 @@ defmodule Iugu.PaymentRequestTest do
              payment_info: %{total_amount_cents: 9113, due_date: "2026-06-25"}
            } = payment_request
 
-    # No Idempotency-Key on this route, so a timeout is never retried: the
-    # first attempt may already have paid the slip.
+    # Without a key a timeout is never retried, even when asked: the first
+    # attempt may already have paid the slip.
     stub_counting_transport_error()
 
     assert {:error, %Error{kind: :transport}} =
              Iugu.create_payment_request(
                %{"barcode" => @barcode, "amount_cents" => 100, "document_amount_cents" => 100},
                api_token: @subaccount_token,
-               signature_private_key: private_key_pem
+               signature_private_key: private_key_pem,
+               retry: :transient,
+               retry_delay: 0,
+               retry_log_level: false
              )
 
     assert attempts() == 1
+
+    # With the key Iugu answers a repeat with 409 instead of paying twice, so
+    # the header goes out and the lost answer is retried.
+    test_pid = self()
+
+    Req.Test.stub(Iugu.Client, fn conn ->
+      send(test_pid, :iugu_attempt)
+      assert Plug.Conn.get_req_header(conn, "idempotency-key") == ["boleto-luz-2026-06"]
+
+      if attempts_so_far() == 1 do
+        Req.Test.transport_error(conn, :timeout)
+      else
+        Req.Test.json(conn, %{"id" => "A1F7", "status" => "pending"})
+      end
+    end)
+
+    assert {:ok, %{id: "A1F7", status: "pending"}} =
+             Iugu.create_payment_request(
+               %{"barcode" => @barcode, "amount_cents" => 100, "document_amount_cents" => 100},
+               api_token: @subaccount_token,
+               signature_private_key: private_key_pem,
+               idempotency_key: "boleto-luz-2026-06",
+               retry_delay: 0,
+               retry_log_level: false
+             )
+
+    assert attempts() == 2
 
     # What the route would reject with 400 is refused here, without a call.
     assert {:error, %Error{kind: :validation, status: nil, messages: ["barcode é obrigatório."]}} =

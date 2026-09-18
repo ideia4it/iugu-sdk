@@ -93,6 +93,7 @@ defmodule Iugu.Marketplace do
   alias Iugu.Pagination
   alias Iugu.Params
   alias Iugu.Response
+  alias Iugu.Split
 
   @create_account_path "/v1/marketplace/create_account"
   @deactivate_path "/v1/marketplace/deactivate"
@@ -121,7 +122,10 @@ defmodule Iugu.Marketplace do
   `live_api_token` da mestre (o padrão). Opções além das do
   `Iugu.Client`:
 
-    * `:splits`: lista de splits padrão, no formato da API (veja o moduledoc)
+    * `:splits`: splits padrão da subconta, como `t:Iugu.Split.t/0` ou os
+      atributos de `Iugu.Split.new/1`, conferidos com `Iugu.Split.validate/1`
+      antes da chamada (a soma que alcança 100% não dá erro na Iugu, só faz
+      o split ser ignorado)
 
   O nome só pode ter letras e espaços; qualquer outra coisa devolve
   `{:error, %Iugu.Error{kind: :validation, status: nil}}` sem ir à
@@ -133,13 +137,25 @@ defmodule Iugu.Marketplace do
     {body_opts, req_opts} = Keyword.split(opts, [:splits])
 
     with :ok <- validate_name(name),
+         {:ok, splits} <- default_splits(Keyword.get(body_opts, :splits)),
          {:ok, body} <-
            Client.post(
              @create_account_path,
-             Params.put_present(%{"name" => name}, "splits", Keyword.get(body_opts, :splits)),
+             Params.put_present(%{"name" => name}, "splits", splits),
              Keyword.merge(req_opts, sign: true, retry: false)
            ) do
       extract_tokens(body)
+    end
+  end
+
+  defp default_splits(nil), do: {:ok, nil}
+
+  defp default_splits(splits) when is_list(splits) do
+    splits = Enum.map(splits, &Split.cast/1)
+
+    case Split.validate(splits) do
+      :ok -> {:ok, Split.to_params(splits)}
+      {:error, %Error{} = error} -> {:error, %Error{error | path: @create_account_path}}
     end
   end
 

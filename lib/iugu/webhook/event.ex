@@ -45,7 +45,8 @@ defmodule Iugu.Webhook.Event do
   `resend_by_period/3` em `Iugu.Webhook` repetem o payload original
   tal qual, e a Iugu aceita gatilhos duplicados para o mesmo evento. O
   receptor responde 2xx na hora e deduplica por `idempotency_key/1` (evento,
-  id do objeto e status) antes de processar.
+  id do objeto, status e, quando existem, parcela e conta destinatária)
+  antes de processar.
 
   ## Lista fechada de eventos
 
@@ -151,17 +152,32 @@ defmodule Iugu.Webhook.Event do
   def authorized?(_received, _expected), do: false
 
   @doc """
-  Chave para deduplicar entregas repetidas: evento, id do objeto e status.
+  Chave para deduplicar entregas repetidas: evento, id do objeto e status,
+  mais a parcela e a conta destinatária quando o evento as tem.
 
   Reenvio manual e por período repetem o payload original, e gatilhos
   duplicados entregam o mesmo evento duas vezes. Sem id legível (antecipação
   de recebíveis, documento de KYC) entra um hash do `data` inteiro.
+
+  `invoice.installment_released` chega uma vez por parcela e
+  `invoice.split_installment_released` uma vez por parcela **e** por conta
+  que recebe, todas com o mesmo id de fatura e o mesmo status. Só o trio
+  evento, id e status juntaria essas entregas numa chave só, e quem deduplica
+  descartaria dinheiro liberado a partir da segunda.
+
+  Até a versão 0.1.0 a chave era só o trio; quem guardou chaves dessas
+  entregas precisa reconstruí-las a partir dos payloads processados (veja o
+  CHANGELOG), porque o replay de uma entrega antiga não bate mais com a
+  chave gravada.
   """
   @spec idempotency_key(t()) :: String.t()
   def idempotency_key(%__MODULE__{} = event) do
     id = object_id(event) || "hash-#{:erlang.phash2(event.data)}"
 
-    Enum.join([event.event, id, status(event) || "-"], "|")
+    delivery_scope =
+      Enum.reject([field(event, "installment"), field(event, "recipient_account_id")], &is_nil/1)
+
+    Enum.join([event.event, id, status(event) || "-"] ++ delivery_scope, "|")
   end
 
   @doc """

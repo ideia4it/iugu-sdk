@@ -146,7 +146,7 @@ defmodule Iugu.TransferRequest do
     :cit,
     :reason_code
   ]
-  @date_filters [:updated_at_from, :updated_at_to]
+  @date_filters [:created_at_from, :created_at_to, :updated_at_from, :updated_at_to]
   @list_filters [:start, :limit, :sort_by, :query] ++ @date_filters
 
   @type t :: %{
@@ -225,8 +225,10 @@ defmodule Iugu.TransferRequest do
   `GET /v1/transfer_requests/`, token da conta. Filtros: `:start`, `:limit`
   (preso a 100), `:query` (busca livre "como valor, chave PIX ou banco"),
   `:sort_by` (`"amount_cents"` ou `"executed_at"`, a única ordenação
-  documentada na API), `:updated_at_from` e `:updated_at_to` (`Date`,
-  `DateTime` no horário de São Paulo ou string).
+  documentada na API; sai como `sortBy`, a grafia desta rota),
+  `:created_at_from`, `:created_at_to`, `:updated_at_from` e
+  `:updated_at_to`, que a referência declara como data `AAAA-MM-DD`: `Date`
+  ou string passam como estão, `DateTime` vira o dia dele em São Paulo.
   """
   @spec list(keyword()) :: {:ok, page()} | {:error, Error.t()}
   def list(opts \\ []) do
@@ -579,12 +581,13 @@ defmodule Iugu.TransferRequest do
       filter_opts
       |> Pagination.params(@max_limit)
       |> Params.put_present(:query, Keyword.get(filter_opts, :query))
+      |> Params.put_present(:sortBy, Keyword.get(filter_opts, :sort_by))
 
     Enum.reduce(@date_filters, params, fn filter, params ->
       Params.put_present(
         params,
         filter,
-        filter_opts |> Keyword.get(filter) |> Params.format_local_datetime()
+        filter_opts |> Keyword.get(filter) |> Params.format_date()
       )
     end)
   end

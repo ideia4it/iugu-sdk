@@ -260,7 +260,7 @@ defmodule Iugu.Charge do
         "iugu_credit_card_payment" => legs
       }
 
-      with {:ok, response} <- Client.post(@two_cards_path, body, opts) do
+      with {:ok, response} <- Client.post(@two_cards_path, body, Keyword.put(opts, :retry, false)) do
         read_two_cards_outcome(response)
       end
     end

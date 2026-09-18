@@ -25,10 +25,10 @@ defmodule Iugu.Pagination do
       excedido (max. 10000)").
 
   Nenhuma listagem documenta ordenação, exceto a de comprovantes de
-  transferência para terceiros, que aceita `sortby` com `amount_cents` ou
-  `executed_at`. As demais vêm "ordenadas pela data de criação, da mais à
-  menos recente". Um `sort_by` fora dessa rota **não está documentado**;
-  confirme contra a conta antes de depender dele.
+  transferência para terceiros, que aceita `sortBy` com `amount_cents` ou
+  `executed_at` (`Iugu.TransferRequest.list/1` monta esse parâmetro,
+  porque a grafia é da rota e a Iugu diferencia caixa). As demais vêm
+  "ordenadas pela data de criação, da mais à menos recente".
   """
 
   alias Iugu.Params
@@ -50,16 +50,12 @@ defmodule Iugu.Pagination do
 
       iex> Iugu.Pagination.params([limit: 500], 1_000)
       %{limit: 500}
-
-      iex> Iugu.Pagination.params(sort_by: "executed_at")
-      %{sortby: "executed_at"}
   """
   @spec params(keyword(), pos_integer()) :: map()
   def params(opts \\ [], max_limit \\ @default_max_limit) do
     %{}
     |> Params.put_present(:start, Keyword.get(opts, :start))
     |> Params.put_present(:limit, clamp_limit(Keyword.get(opts, :limit), max_limit))
-    |> Params.put_present(:sortby, Keyword.get(opts, :sort_by))
   end
 
   @doc """

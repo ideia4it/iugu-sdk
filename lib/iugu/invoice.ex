@@ -370,11 +370,13 @@ defmodule Iugu.Invoice do
   `POST /v1/invoices/{id}/capture`, sem corpo; captura parcial **não está
   documentada**. A fatura volta `paid` e o webhook `invoice.status_changed`
   dispara. Fora de `in_analysis`: 400 `Apenas Faturas em análise podem ser
-  capturadas`.
+  capturadas`. Captura, reembolso e reembolso parcial movem dinheiro sem
+  `Idempotency-Key` documentada, então nunca repetem, mesmo com retry
+  pedido na opção ou em `:req_options`.
   """
   @spec capture(String.t(), keyword()) :: {:ok, invoice()} | {:error, Error.t()}
   def capture(invoice_id, opts \\ []) when is_binary(invoice_id) do
-    Client.request(:post, "#{invoice_path(invoice_id)}/capture", opts)
+    Client.request(:post, "#{invoice_path(invoice_id)}/capture", Keyword.put(opts, :retry, false))
   end
 
   @doc """
@@ -388,7 +390,7 @@ defmodule Iugu.Invoice do
   """
   @spec refund(String.t(), keyword()) :: {:ok, invoice()} | {:error, Error.t()}
   def refund(invoice_id, opts \\ []) when is_binary(invoice_id) do
-    Client.request(:post, refund_path(invoice_id), opts)
+    Client.request(:post, refund_path(invoice_id), Keyword.put(opts, :retry, false))
   end
 
   @doc """
@@ -407,7 +409,11 @@ defmodule Iugu.Invoice do
     path = refund_path(invoice_id)
 
     if refund_cents > 0 do
-      Client.post(path, %{"partial_value_refund_cents" => refund_cents}, opts)
+      Client.post(
+        path,
+        %{"partial_value_refund_cents" => refund_cents},
+        Keyword.put(opts, :retry, false)
+      )
     else
       {:error, Error.validation("O valor do reembolso parcial precisa ser positivo.", path)}
     end

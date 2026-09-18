@@ -447,6 +447,21 @@ defmodule Iugu.ChargeTest do
                %{token: "tok-2", amount_cents: 500}
              ])
 
+    # A lost answer is never retried, even when asked: one card may already
+    # have been charged, and the route has no idempotency key.
+    stub_counting_transport_error()
+
+    assert {:error, %Error{kind: :transport}} =
+             Iugu.create_charge_with_two_cards(
+               "INV",
+               [%{token: "tok-1", amount_cents: 500}, %{token: "tok-2", amount_cents: 500}],
+               retry: :transient,
+               retry_delay: 0,
+               retry_log_level: false
+             )
+
+    assert attempts() == 1
+
     refused = [
       {[%{token: "tok-1", amount_cents: 1_000}], ~r/exatamente dois/},
       {[%{token: "tok-1", amount_cents: 500}, %{token: "", amount_cents: 500}],

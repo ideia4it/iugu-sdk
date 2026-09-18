@@ -131,6 +131,20 @@ defmodule Iugu.DepositTest do
              Iugu.refund_deposit("1ACAE09AFDAB4C6EBB15DC0DBF82CB8C", api_token: @subaccount_token)
 
     assert attempts() == 1
+
+    # Not even an explicit retry gets through: a timeout may have started the
+    # refund, and the route has no idempotency key to make a repeat safe.
+    stub_counting_transport_error()
+
+    assert {:error, %Error{kind: :transport}} =
+             Iugu.refund_deposit("1ACAE09AFDAB4C6EBB15DC0DBF82CB8C",
+               api_token: @subaccount_token,
+               retry: :transient,
+               retry_delay: 0,
+               retry_log_level: false
+             )
+
+    assert attempts() == 1
   end
 
   test "lists the account's deposits with the limit capped at 1000 and streams all pages" do

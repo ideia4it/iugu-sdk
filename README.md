@@ -17,7 +17,7 @@ Documentação oficial: <https://dev.iugu.com>
 Consumida como dependência git:
 
 ```elixir
-{:iugu_sdk, git: "https://github.com/ideia4it/iugu-sdk.git", tag: "v0.1.0"}
+{:iugu_sdk, git: "https://github.com/ideia4it/iugu-sdk.git", tag: "v0.1.1"}
 ```
 
 ```bash
@@ -343,8 +343,10 @@ recursos:
   `list_payment_requests/1`): valide a linha digitável primeiro, que a Iugu
   confere na CIP e devolve valor, multa, juros e se o boleto já foi baixado;
   o pagamento tem de sair **em até 15 minutos** da validação. O pedido é
-  assinado, sem `Idempotency-Key` e por isso sem retry: depois de um timeout,
-  reencontre o pedido listando por `barcode`. O desfecho chega por
+  assinado e aceita `Idempotency-Key` (opção `:idempotency_key`, que liga o
+  retry; a página de idempotência passou a listar a rota em 16/09/2026); sem
+  a chave não há retry, e depois de um timeout reencontre o pedido listando
+  por `barcode`. O desfecho chega por
   `payment_request.status_changed` (`pending` → `processing` → `done` ou
   `rejected`).
 - **Depósito** (`get_deposit/2`, `list_deposits/1`, `refund_deposit/2`):
@@ -449,11 +451,18 @@ repetem por padrão. A maioria das rotas de escrita da Iugu não aceita chave
 de idempotência (saque, criação de subconta, configuração de conta, tokens de
 API, gatilhos), e um retry em timeout gera uma segunda movimentação. As que
 aceitam `Idempotency-Key` (fatura, cobrança direta, cliente, transferência
-entre contas, Pix e TED para terceiros) ligam o retry quando o chamador passa
-`:idempotency_key`, com `:transient` e não `:safe_transient` (este só repete
-um POST em 429 e 503, nunca em timeout); `Iugu.Client.idempotency_options/2`
-monta essas opções para todas. Sem a chave, essas rotas, o saque e a criação
-de subconta forçam o retry desligado mesmo com a opção ligada.
+entre contas, Pix e TED para terceiros, pagamento de boleto) ligam o retry
+quando o chamador passa `:idempotency_key`, com `:transient` e não
+`:safe_transient` (este só repete um POST em 429 e 503, nunca em timeout);
+`Iugu.Client.idempotency_options/2` monta essas opções para todas. Sem a
+chave, essas rotas e toda rota que move dinheiro sem chave documentada
+(saque, criação de subconta, captura e reembolso de fatura, cobrança em dois
+cartões, devolução de depósito) forçam o retry desligado mesmo com a opção
+ligada ou com retry em `:req_options`.
+
+Nenhum cliente segue redirect (`redirect: false`): a API não redireciona, e
+seguir um 3xx reenviaria token, assinatura e corpo para o host que a resposta
+apontasse.
 
 ## O que este SDK não tem, e por quê
 
@@ -666,8 +675,9 @@ que a funcionalidade tocar, e atualiza aqui.
 
 - Pagar boleto: o envelope do 422 de `create_payment_request/2` (saldo
   insuficiente, janela dos 15 minutos vencida, convênio fora da lista) e se
-  a validação expirada é 400 ou 422; se a rota aceita `Idempotency-Key` sem
-  documentar (o SDK não confia); se `GET /v1/payment_requests` traz
+  a validação expirada é 400 ou 422; se a página da rota, que não menciona
+  o header, e a página de idempotência, que lista a rota desde 16/09/2026,
+  concordam na prática; se `GET /v1/payment_requests` traz
   `totalItems` (o exemplo é uma lista crua) e se a mestre enxerga os pedidos
   das subcontas; status além dos quatro do filtro; a barra final que a
   referência escreve nas rotas (os curls não a têm; o SDK segue os curls)

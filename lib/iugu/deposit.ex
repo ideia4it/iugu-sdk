@@ -150,13 +150,20 @@ defmodule Iugu.Deposit do
   Devolve um depósito Pix inteiro ao pagador. Veja o moduledoc.
 
   `PUT /v1/deposits/{id}/refund`, token da conta que recebeu, sem corpo e
-  sem assinatura declarada. Sem retry: a repetição de uma devolução que
-  entrou responde 400, mas uma que ficou em timeout não deve sair duas
-  vezes. A resposta vem normalizada, com `status: "processing_refund"`.
+  sem assinatura declarada. Sem retry, mesmo que a opção ou `:req_options`
+  o liguem: a repetição de uma devolução que entrou responde 400, mas uma
+  que ficou em timeout não deve sair duas vezes, e a rota não documenta
+  `Idempotency-Key`. A resposta vem normalizada, com
+  `status: "processing_refund"`.
   """
   @spec refund(String.t(), keyword()) :: {:ok, t()} | {:error, Error.t()}
   def refund(deposit_id, opts \\ []) when is_binary(deposit_id) do
-    with {:ok, body} <- Client.request(:put, "#{item_path(deposit_id)}/refund", opts) do
+    with {:ok, body} <-
+           Client.request(
+             :put,
+             "#{item_path(deposit_id)}/refund",
+             Keyword.put(opts, :retry, false)
+           ) do
       {:ok, normalize(body)}
     end
   end

@@ -388,6 +388,23 @@ defmodule Iugu.InvoiceTest do
     assert {:error, %Error{kind: :validation, status: nil, path: "/v1/invoices/INV/refund"}} =
              Iugu.partially_refund_invoice("INV", 0)
 
+    # None of the three money moves repeats after a lost answer, even with a
+    # retry asked for: a second partial refund would give back twice.
+    money_moves = [
+      fn opts -> Iugu.capture_invoice("INV", opts) end,
+      fn opts -> Iugu.refund_invoice("INV", opts) end,
+      fn opts -> Iugu.partially_refund_invoice("INV", 1_000, opts) end
+    ]
+
+    for move <- money_moves do
+      stub_counting_transport_error()
+
+      assert {:error, %Error{kind: :transport}} =
+               move.(retry: :transient, retry_delay: 0, retry_log_level: false)
+
+      assert attempts() == 1
+    end
+
     # Second copy: the due date is mandatory, items may be edited or removed
     # by id, and the answer is a new invoice.
     expect_request(fn conn, body ->

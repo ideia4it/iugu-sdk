@@ -58,6 +58,33 @@ defmodule Iugu.Webhook.EventTest do
     refute Event.idempotency_key(refunded) == Event.idempotency_key(event)
     refute Event.paid?(refunded)
 
+    # A split paid in installments is released once per installment and per
+    # recipient, all with the same invoice id and status: each delivery has
+    # to land on its own key, or the second one is dropped as a duplicate.
+    released = fn installment, recipient ->
+      {:ok, released} =
+        Event.parse(%{
+          "data" => %{
+            "event" => "invoice.split_installment_released",
+            "id" => "1757E1D7FD5E410A9C563024250015BF",
+            "status" => "released",
+            "installment" => installment,
+            "number_of_installments" => "2",
+            "recipient_account_id" => recipient,
+            "split_participant_amount_cents" => "22500"
+          }
+        })
+
+      Event.idempotency_key(released)
+    end
+
+    assert released.("1", "REC-A") ==
+             "invoice.split_installment_released|1757E1D7FD5E410A9C563024250015BF|released|1|REC-A"
+
+    assert released.("1", "REC-A") == released.("1", "REC-A")
+    refute released.("1", "REC-A") == released.("2", "REC-A")
+    refute released.("1", "REC-A") == released.("1", "REC-B")
+
     # Absent and empty values are nil, never zero or false: the logs show
     # data[async_charged]= arriving empty without meaning "no".
     {:ok, created} =

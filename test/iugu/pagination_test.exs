@@ -18,9 +18,6 @@ defmodule Iugu.PaginationTest do
     assert Pagination.params(limit: -1) == %{}
     assert Pagination.params(limit: "10") == %{}
 
-    # Transfer receipts are the only listing with a documented sort.
-    assert Pagination.params(sort_by: "amount_cents") == %{sortby: "amount_cents"}
-
     # Iugu echoes neither start nor limit, so they come from what was sent;
     # totalItems is reported but never trusted to end a loop.
     assert Pagination.page_info(%{"items" => [], "totalItems" => 66}, start: 100, limit: 50) ==
